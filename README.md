@@ -1,11 +1,12 @@
 # ML-3 — Credit Risk Scorecard with Fair-Lending Analysis
 
-**Status: ~20% slice.** The scorecard machinery, the challenger comparison, and
-the swap-set analysis are built. The fair-lending work is a single screen, not
-the analysis the spec asks for — see below.
+**Status: ~70%.** The scorecard machinery, the challenger comparison, the
+swap-set analysis and a full fair-lending analysis are built. Real data,
+categorical binning and vintage stability are not.
 
 ```bash
-python run_scorecard.py
+python run_scorecard.py       # scorecard, challenger, calibration, swap set
+python run_fair_lending.py    # -> docs/FAIR_LENDING.md
 ```
 
 ## What is built
@@ -58,21 +59,58 @@ Reject inference is not fixed: funded default rate 28.3%, true all-applicant
 rate 41.0% (visible only because the generator produced it). Every number above
 inherits that bias.
 
-## What is NOT built (the other 80%)
+## Fair lending ([docs/FAIR_LENDING.md](docs/FAIR_LENDING.md))
 
-1. **Fair lending is one screen, not an analysis.** The adverse impact ratio at
-   the approval threshold exists. Missing: score-distribution comparison across
-   groups, the **proxy-feature test** (does removing zip-code-like features
-   change the disparity — the sophisticated part, and the spec's differentiator
-   #3), threshold-sweep AIR, and `docs/FAIR_LENDING.md` itself. `region_risk` was
-   built into the generator as a proxy specifically so this test could be run,
-   and it has not been run.
-2. **Real data.** Lending Club / Home Credit swap-in not done; this is synthetic.
-3. **Reject inference method** — no parcelling, no augmentation, no bureau-score
-   fuzzy augmentation. Named and quantified only.
-4. **Categorical WoE binning** — numeric features only; no categorical
-   treatment, no special-value/missing bin handling (a real card needs both).
-5. **Score stability**: no PSI across vintages, no bin-population drift.
-6. **Model documentation**: no validation report, no scorecard sign-off pack.
-7. Confidence intervals on AUC/Gini/swap-set rates — needed before the
-   recommendation above deserves the word "recommendation".
+The spec's differentiator #3 — the proxy test — is built, along with the clause
+most fair-lending sections omit.
+
+Two features with ordinary business rationales (a regional risk index, a blended
+geography/utilisation score) partially encode geography. That is how proxies
+actually arrive: nobody adds a prohibited basis, somebody adds a branch-distance
+feature.
+
+| | full model | proxies dropped |
+|---|---|---|
+| AIR | 0.9646 | 0.9923 |
+| group reconstruction AUC | — | 19% of signal retained |
+
+AIR is reported with a **bootstrap 95% CI [0.9393, 0.9899]**, because the 80%
+rule gets applied to a point estimate as though it were exact, and 0.79 on a thin
+sample is not the same finding as 0.79 on a fat one.
+
+**The less-discriminatory-alternative search is the part worth reading.** Under
+disparate-impact doctrine, business necessity does not end the analysis: if a
+less discriminatory alternative serves the same purpose comparably well, the
+original practice remains actionable. Here the scorecard without proxies improves
+AIR by +0.0277 at a cost of 0.0105 AUC — which **exceeds my stated 0.005
+tolerance**. So the verdict is not a clean pass:
+
+> an alternative DID reduce disparity but exceeded the stated accuracy tolerance
+> — the tolerance itself now requires justification
+
+The tolerance is a number I chose, and "our tolerance said no" is not a defence
+when the tolerance was set by the party whose model is under review. The
+alternative is live and the threshold needs an owner outside modelling. Collapsing
+that into a single pass/fail is how a real alternative gets quietly dismissed,
+which is why the code reports the two failure modes separately.
+
+## What is NOT built
+
+1. **Real data.** Lending Club / Home Credit swap-in not done; this is synthetic,
+   and the protected attribute is fabricated by the generator. No result here
+   describes a real population.
+2. **Reject inference method** — no parcelling, no augmentation, no bureau-score
+   fuzzy augmentation. Named and quantified (28.3% funded vs 41.0% true) only.
+3. **Categorical WoE binning** — numeric features only; no categorical treatment
+   and no special-value/missing bin. A real card needs both.
+4. **Score stability**: no PSI across vintages, no bin-population drift report.
+5. **Model documentation**: no validation report, no scorecard sign-off pack.
+   (ML-1 has one; this project does not.)
+6. **Business-necessity documentation** for the features driving the disparity —
+   that requires the lender's justification, not the modeller's.
+7. **Intersectional analysis**: one binary attribute, no age or marital status,
+   no geography-based redlining analysis.
+8. Confidence intervals on AUC/Gini and on the swap-set default rates. The AIR
+   has one; the champion-vs-challenger recommendation still does not, which is
+   why the README calls the two models indistinguishable rather than declaring a
+   winner.
