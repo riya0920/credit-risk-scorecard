@@ -1,12 +1,14 @@
 # ML-3 — Credit Risk Scorecard with Fair-Lending Analysis
 
-**Status: ~70%.** The scorecard machinery, the challenger comparison, the
-swap-set analysis and a full fair-lending analysis are built. Real data,
-categorical binning and vintage stability are not.
+**Status: ~90%.** Scorecard machinery, challenger comparison, swap-set
+analysis, full fair-lending analysis, reject inference scored against
+counterfactual truth, and 17 tests. Real data and vintage stability are not.
 
 ```bash
-python run_scorecard.py       # scorecard, challenger, calibration, swap set
-python run_fair_lending.py    # -> docs/FAIR_LENDING.md
+python run_scorecard.py         # scorecard, challenger, calibration, swap set
+python run_fair_lending.py      # -> docs/FAIR_LENDING.md
+python run_reject_inference.py  # parcelling scored against hidden outcomes
+python -m pytest tests -q       # 17 tests
 ```
 
 ## What is built
