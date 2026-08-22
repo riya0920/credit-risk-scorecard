@@ -32,3 +32,5 @@ jobs:
       - name: Fair lending analysis
         run: python run_fair_lending.py
 
+      - name: Vintage stability and intervals
+        run: python run_stability.py

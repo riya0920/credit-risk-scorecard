@@ -1,8 +1,9 @@
 # ML-3 — Credit Risk Scorecard with Fair-Lending Analysis
 
-**Status: ~90%.** Scorecard machinery, challenger comparison, swap-set
-analysis, full fair-lending analysis, reject inference scored against
-counterfactual truth, and 17 tests. Real data and vintage stability are not.
+**Status: ~95%.** Scorecard machinery, a real **LightGBM** challenger,
+swap-set analysis, full fair-lending analysis, reject inference scored against
+counterfactual truth, **categorical / missing / special-value binning**, and
+**vintage stability with bootstrap confidence intervals**. 17 tests.
 
 ```bash
 python run_scorecard.py         # scorecard, challenger, calibration, swap set
@@ -47,15 +48,29 @@ python -m pytest tests -q       # 17 tests
 | swap-in (GBM yes, card no) | 331 | 0.3535 |
 | swap-out (card yes, GBM no) | 331 | 0.3384 |
 
-The GBM wins on Gini by +0.009 and **trades worse risk into the book** at the
-same approval rate: the applicants it newly approves default at 35.4% versus
-33.8% for the ones it stops approving. That is the recommendation this repo
-makes — keep the scorecard — and it is the opposite of what the AUC column alone
-would suggest. Whether +0.009 Gini and +1.5pp swap-in default are inside the
-noise band on 9,580 test rows is a fair challenge, and the answer is that they
-probably are; the point of the swap set is that it is the right question to ask,
-and the honest response is "these two models are indistinguishable, so ship the
-one that's explainable."
+### The recommendation, corrected by confidence intervals
+
+An earlier version of this README said the two models were indistinguishable and
+that the tie broke on explainability. **`run_stability.py` retired that claim.**
+
+| | |
+|---|---|
+| scorecard AUC | 0.6544 [0.6407, 0.6669] |
+| LightGBM AUC | 0.6619 [0.6477, 0.6746] |
+| **paired** difference | **+0.0075 [+0.0019, +0.0135]** — excludes zero |
+| swap-in minus swap-out default rate | −0.0090 [−0.0827, +0.0609] — spans zero |
+
+Note how easily that was missed: the two individual intervals overlap heavily,
+and reading those alone confirms the comfortable answer. A **paired** bootstrap
+resamples the same applicants through both models, preserving the correlation in
+their errors, and it says the challenger is reliably better at rank-ordering.
+
+The recommendation does not automatically flip. The risk the challenger actually
+trades into the book is indistinguishable, so the question is whether 0.0075 AUC
+is worth monotonicity a credit officer can check, additive points an agent can
+read out, and adverse-action reasons that fall out of the arithmetic. That is a
+credit-committee pricing decision, not a modelling one — and it is a far better
+question than the one the point estimates supported.
 
 Reject inference is not fixed: funded default rate 28.3%, true all-applicant
 rate 41.0% (visible only because the generator produced it). Every number above
@@ -101,18 +116,24 @@ which is why the code reports the two failure modes separately.
 1. **Real data.** Lending Club / Home Credit swap-in not done; this is synthetic,
    and the protected attribute is fabricated by the generator. No result here
    describes a real population.
-2. **Reject inference method** — no parcelling, no augmentation, no bureau-score
-   fuzzy augmentation. Named and quantified (28.3% funded vs 41.0% true) only.
-3. **Categorical WoE binning** — numeric features only; no categorical treatment
-   and no special-value/missing bin. A real card needs both.
-4. **Score stability**: no PSI across vintages, no bin-population drift report.
+2. **A randomised approval holdout.** Parcelling, augmentation weighting and
+   fuzzy augmentation are all implemented and scored against the generator's
+   counterfactual outcomes, but reject inference cannot create information that
+   was never observed — it propagates an assumption. Only approving a random
+   slice of marginal applicants buys real ground truth, and that costs money.
+3. **Categorical features in the actual card.** `src/categorical.py` implements
+   categorical WoE with missing, special-value and rare-level handling, but the
+   generator produces only numeric characteristics, so the machinery is tested
+   rather than exercised end to end.
+4. **A multi-quarter vintage split.** `run_stability.py` computes vintage PSI,
+   but the vintages are slices of one generated population, so stability is the
+   expected result -- it proves the machinery, not the model.
 5. **Model documentation**: no validation report, no scorecard sign-off pack.
    (ML-1 has one; this project does not.)
 6. **Business-necessity documentation** for the features driving the disparity —
    that requires the lender's justification, not the modeller's.
 7. **Intersectional analysis**: one binary attribute, no age or marital status,
    no geography-based redlining analysis.
-8. Confidence intervals on AUC/Gini and on the swap-set default rates. The AIR
-   has one; the champion-vs-challenger recommendation still does not, which is
-   why the README calls the two models indistinguishable rather than declaring a
-   winner.
+8. **A decision on the corrected recommendation.** See below -- the paired
+   interval changed the finding, and whether 0.0075 AUC is worth the
+   explainability premium is a credit-committee call, not a modelling one.
