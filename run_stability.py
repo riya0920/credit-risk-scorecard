@@ -16,7 +16,10 @@ from sklearn.metrics import roc_auc_score
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from run_scorecard import APPROVAL_RATE, FEATURES, TARGET, fit_binning
+from run_scorecard import (ALL_CHARACTERISTICS, APPROVAL_RATE, CATEGORICAL,
+                           FEATURES, SPECIAL_VALUES, TARGET, _column,
+                           fit_binning)
+from src.categorical import fit_categorical_binning, fit_hybrid_binning
 from src import stability
 from src.generate import generate
 from src.scorecard import Scorecard, ScorecardConfig
@@ -30,6 +33,35 @@ def fit_card(X_tr, y_tr, names):
     return card
 
 
+def fit_full_card(frame, y):
+    """The card as `run_scorecard.py` builds it -- categoricals included.
+
+    This script used to fit both models on the numeric characteristics only.
+    That was internally fair but it was not the same model the rest of the repo
+    reports on, so the confidence intervals here described a card nobody else
+    was looking at.
+    """
+    binnings = {f: fit_binning(frame[f].to_numpy(float), y, f) for f in FEATURES}
+    for f in CATEGORICAL:
+        binnings[f] = fit_categorical_binning(frame[f].to_numpy(object), y, f)
+    for f, sp in SPECIAL_VALUES.items():
+        binnings[f] = fit_hybrid_binning(frame[f].to_numpy(float), y, f, sp)
+    card = Scorecard(binnings, ScorecardConfig())
+    card.fit({f: _column(frame, f) for f in ALL_CHARACTERISTICS}, y)
+    return card
+
+
+def gbm_frame(frame):
+    """The same characteristics, in the shape a tree wants them."""
+    out = frame[FEATURES + CATEGORICAL + list(SPECIAL_VALUES)].copy()
+    for c in CATEGORICAL:
+        out[c] = out[c].astype("category")
+    for c in SPECIAL_VALUES:
+        out[c + "__nohit"] = (out[c] == -9).astype(int)
+        out[c] = out[c].mask(out[c] == -9)
+    return out
+
+
 def main() -> int:
     df = generate()
     funded = df[df.approved_by_incumbent == 1].reset_index(drop=True)
@@ -39,18 +71,19 @@ def main() -> int:
     X_tr, y_tr = tr[FEATURES].to_numpy(float), tr[TARGET].to_numpy()
     X_te, y_te = te[FEATURES].to_numpy(float), te[TARGET].to_numpy()
 
-    card = fit_card(X_tr, y_tr, FEATURES)
-    s_card = card.predict_proba({n: X_te[:, i] for i, n in enumerate(FEATURES)})
+    card = fit_full_card(tr, y_tr)
+    s_card = card.predict_proba({f: _column(te, f) for f in ALL_CHARACTERISTICS})
 
     import lightgbm as lgb
     mono = {"dti": 1, "utilization": 1, "delinq_2y": 1, "inquiries_6m": 1,
             "credit_age_months": -1, "employment_years": -1, "income": -1}
+    tr_g, te_g = gbm_frame(tr), gbm_frame(te)
     gbm = lgb.LGBMClassifier(
         n_estimators=300, learning_rate=0.06, num_leaves=15,
         min_child_samples=100, reg_lambda=1.0, random_state=0, verbose=-1,
-        n_jobs=1, monotone_constraints=[mono[f] for f in FEATURES])
-    gbm.fit(X_tr, y_tr)
-    s_gbm = gbm.predict_proba(X_te)[:, 1]
+        n_jobs=1, monotone_constraints=[mono.get(c, 0) for c in tr_g.columns])
+    gbm.fit(tr_g, y_tr, categorical_feature=CATEGORICAL)
+    s_gbm = gbm.predict_proba(te_g)[:, 1]
 
     print("=" * 78)
     print("1. DISCRIMINATION, WITH INTERVALS")
@@ -134,27 +167,90 @@ def main() -> int:
 
     # ---- vintages ---------------------------------------------------------
     print("\n" + "=" * 78)
-    print("4. VINTAGE STABILITY")
+    print("4. VINTAGE STABILITY -- twelve real booking cohorts")
     print("-" * 78)
-    ref = card.predict_proba({n: X_tr[:, i] for i, n in enumerate(FEATURES)})
-    n_v = 4
-    chunks = np.array_split(np.arange(len(te)), n_v)
-    vintages = {"V{}".format(i + 1): s_card[c] for i, c in enumerate(chunks)}
+    ref = card.predict_proba({f: _column(tr, f) for f in ALL_CHARACTERISTICS})
 
-    print("{:<10}{:>8}{:>10}  {}".format("vintage", "n", "score PSI", "band"))
+    # Real cohorts from the generator, not slices of one homogeneous draw. Two
+    # things move across them and they mean opposite things:
+    #   MIX SHIFT      later cohorts carry thinner files and higher utilisation
+    #                  (the lender loosened marketing). PSI moves; the model is
+    #                  still correct and the answer is to reprice.
+    #   OUTCOME SHIFT  later cohorts default more AT THE SAME characteristics
+    #                  (the economy turned). PSI does not move; the model is now
+    #                  wrong and the answer is to rebuild.
+    # A vintage report that cannot separate them sends a credit officer to do
+    # the opposite of the right thing.
+    v_te = te["vintage_month"].to_numpy()
+    vintages, actuals = {}, {}
+    for v in sorted(set(v_te)):
+        m = v_te == v
+        if m.sum() < 100:
+            continue
+        vintages["M{:02d}".format(int(v))] = s_card[m]
+        actuals["M{:02d}".format(int(v))] = float(y_te[m].mean())
+
+    print("{:<8}{:>8}{:>11}{:>12}{:>16}  {}".format(
+        "vintage", "n", "score PSI", "mean PD", "actual default", "band"))
     for row in stability.vintage_report(vintages, ref):
-        print("{:<10}{:>8,}{:>10.4f}  {}".format(
-            row["vintage"], row["n"], row["psi"], row["band"]))
+        name = row["vintage"]
+        print("{:<8}{:>8,}{:>11.4f}{:>12.4f}{:>15.2%}   {}".format(
+            name, row["n"], row["psi"], float(np.mean(vintages[name])),
+            actuals[name], row["band"]))
 
-    print("\n{:<22}{:>10}  {}".format("characteristic", "PSI", "band"))
-    for row in stability.characteristic_stability(X_tr, X_te, FEATURES):
+    rates = [actuals[k] for k in sorted(actuals)]
+    psis = [r["psi"] for r in stability.vintage_report(vintages, ref)]
+    print("\nactual default rate, first vintage -> last : {:.2%} -> {:.2%} "
+          "({:+.1f} pts)".format(rates[0], rates[-1],
+                                 (rates[-1] - rates[0]) * 100))
+    print("score PSI over the same span              : {:.4f} -> {:.4f}".format(
+        psis[0], psis[-1]))
+
+    # Characteristic PSI EARLY vintages vs LATE ones. Comparing the build
+    # sample against the whole test set instead would compare two mixtures of
+    # the same twelve cohorts, whose marginals agree by construction -- a
+    # comparison guaranteed to report stability whatever the cohorts did.
+    early = v_te <= 3
+    late = v_te >= 8
+    print("\n{:<22}{:>10}  {}".format(
+        "characteristic (M00-03 vs M08-11)", "PSI", "band"))
+    for row in stability.characteristic_stability(
+            X_te[early], X_te[late], FEATURES):
         print("{:<22}{:>10.4f}  {}".format(
             row["characteristic"], row["psi"], row["band"]))
 
-    print("\nBands: <0.10 stable | 0.10-0.25 monitor | >0.25 investigate. The")
-    print("vintages here are slices of one generated population, so stability is")
-    print("the expected result and proves the machinery rather than the model --")
-    print("a real vintage split spans quarters of genuinely different applicants.")
+    # ---- the point of the section ----------------------------------------
+    print("\n" + "-" * 78)
+    print("SEPARATING THE TWO SHIFTS")
+    print("-" * 78)
+    print("{:<28}{:>16}{:>16}".format("", "early M00-M03", "late M08-M11"))
+    print("{:<28}{:>16,}{:>16,}".format("n", int(early.sum()), int(late.sum())))
+    print("{:<28}{:>16.2%}{:>16.2%}".format(
+        "actual default rate", y_te[early].mean(), y_te[late].mean()))
+    print("{:<28}{:>16.4f}{:>16.4f}".format(
+        "predicted default rate",
+        s_pred_early := float(np.mean(s_card[early])),
+        s_pred_late := float(np.mean(s_card[late]))))
+
+    obs_gap = y_te[late].mean() - y_te[early].mean()
+    pred_gap = s_pred_late - s_pred_early
+    print()
+    print("observed deterioration : {:+.2%}".format(obs_gap))
+    print("explained by mix shift : {:+.2%}  (what the model predicted)".format(
+        pred_gap))
+    print("UNEXPLAINED            : {:+.2%}  (the model did not see this)".format(
+        obs_gap - pred_gap))
+    print()
+    print("That residual is the number a monitoring pack needs and PSI cannot")
+    print("produce. The characteristics did move -- utilisation and credit age")
+    print("both drifted, and the card repriced for them. What it could not")
+    print("reprice is applicants defaulting MORE AT THE SAME characteristics,")
+    print("because nothing in the characteristics says the economy turned.")
+    print()
+    print("Bands: <0.10 stable | 0.10-0.25 monitor | >0.25 investigate. Bands")
+    print("are a convention, not a test -- they carry no sample size, so a 0.09")
+    print("on 200 accounts and a 0.09 on 200,000 read identically and are not")
+    print("the same evidence.")
     print("=" * 78)
     return 0
 

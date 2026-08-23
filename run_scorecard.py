@@ -21,10 +21,37 @@ sys.path.insert(0, str(ROOT))
 
 from src.generate import generate
 from src.scorecard import Scorecard, ScorecardConfig
+from src.categorical import fit_categorical_binning, fit_hybrid_binning
 from src.woe import fit_binning, iv_band
+
+
+def _column(df, feature):
+    """Numeric characteristics as floats, categorical ones as objects.
+
+    `to_numpy(float)` on a column holding None produces nan and silently
+    collapses the missing LEVEL into a numeric hole, which is the bug this
+    project exists to avoid making.
+    """
+    if feature in CATEGORICAL:
+        return df[feature].to_numpy(object)
+    return df[feature].to_numpy(float)
 
 FEATURES = ["dti", "utilization", "delinq_2y", "inquiries_6m",
             "credit_age_months", "employment_years", "income"]
+
+# Categorical characteristics carried by the SAME card, not a parallel model.
+# `home_ownership` is ordinary; `loan_purpose` has a rare level that has to be
+# merged rather than given its own points; `employment_type` is missing for
+# 9.4% of applicants and that missingness is NOT at random -- it concentrates in
+# the self-employed, who default more. `__MISSING__` is therefore a LEVEL with
+# its own WoE, not a hole to impute, and imputing the mode here would import the
+# W2 default rate onto the riskiest slice of the book.
+CATEGORICAL = ["home_ownership", "loan_purpose", "employment_type"]
+
+# A special value, not a measurement: -9 is the bureau's "no hit" code. Binned
+# on its own so it cannot be averaged into a credit age.
+SPECIAL_VALUES = {"credit_age_reported": [-9]}
+ALL_CHARACTERISTICS = FEATURES + CATEGORICAL + list(SPECIAL_VALUES)
 TARGET = "defaulted"
 APPROVAL_RATE = 0.80          # policy: approve the best 80% of applicants
 
@@ -91,19 +118,30 @@ def main() -> None:
 
     # ---- champion: WoE scorecard ------------------------------------------
     binnings = {f: fit_binning(tr[f].to_numpy(float), y_tr, f) for f in FEATURES}
+    for f in CATEGORICAL:
+        binnings[f] = fit_categorical_binning(tr[f].to_numpy(object), y_tr, f)
+    for f, specials in SPECIAL_VALUES.items():
+        binnings[f] = fit_hybrid_binning(
+            tr[f].to_numpy(float), y_tr, f, special_values=specials)
     print("\n" + "=" * 76)
     print("CHAMPION: WoE SCORECARD -- information value")
     print("-" * 76)
-    print("{:<20}{:>8}{:>10}{:>28}".format("feature", "IV", "bins", "band"))
-    for f in FEATURES:
+    print("{:<22}{:>12}{:>8}{:>8}{:>18}".format(
+        "characteristic", "kind", "IV", "bins", "band"))
+    for f in ALL_CHARACTERISTICS:
         b = binnings[f]
-        print("{:<20}{:>8.4f}{:>10}{:>28}".format(
-            f, b.iv, len(b.bins), iv_band(b.iv) + ("" if b.monotonic else " NON-MONOTONIC")))
+        kind = ("numeric" if f in FEATURES
+                else "categorical" if f in CATEGORICAL else "hybrid")
+        note = iv_band(b.iv)
+        if f in FEATURES and not b.monotonic:
+            note += " NON-MONOTONIC"
+        print("{:<22}{:>12}{:>8.4f}{:>8}{:>18}".format(
+            f, kind, b.iv, len(b.bins), note))
 
     card = Scorecard(binnings, ScorecardConfig(base_score=600, base_odds=20, pdo=20))
-    card.fit({f: tr[f].to_numpy(float) for f in FEATURES}, y_tr)
+    card.fit({f: _column(tr, f) for f in ALL_CHARACTERISTICS}, y_tr)
 
-    X_te = {f: te[f].to_numpy(float) for f in FEATURES}
+    X_te = {f: _column(te, f) for f in ALL_CHARACTERISTICS}
     p_card = card.predict_proba(X_te)
     s_card = card.scores(X_te)
 
@@ -124,12 +162,39 @@ def main() -> None:
     # ---- challenger: GBM ---------------------------------------------------
     mono = {"dti": 1, "utilization": 1, "delinq_2y": 1, "inquiries_6m": 1,
             "credit_age_months": -1, "employment_years": -1, "income": -1}
+    # The challenger gets the SAME characteristics as the card, categoricals
+    # included. It did not, at first, and the card came out ahead by 0.013 AUC
+    # -- a result that would have read as "the interpretable model wins" when
+    # what actually happened is that the challenger was handicapped by four
+    # characteristics it was never shown. A bakeoff where the two models see
+    # different data measures the feature list, not the model.
+    #
+    # HistGradientBoosting takes categoricals natively as a pandas category
+    # dtype, which also means missing stays missing rather than becoming a
+    # one-hot column of zeros indistinguishable from "not this level".
+    gbm_cols = FEATURES + CATEGORICAL + list(SPECIAL_VALUES)
+
+    def _gbm_frame(frame):
+        out = frame[gbm_cols].copy()
+        for c in CATEGORICAL:
+            out[c] = out[c].astype("category")
+        # -9 is a code, not a quantity: hand the tree the indicator separately
+        # and leave the numeric column missing, so it cannot split on -9 as an
+        # age.
+        for c in SPECIAL_VALUES:
+            out[c + "__nohit"] = (out[c] == -9).astype(int)
+            out[c] = out[c].mask(out[c] == -9)
+        return out
+
+    tr_g, te_g = _gbm_frame(tr), _gbm_frame(te)
+    mono_vec = [mono.get(c, 0) for c in tr_g.columns]
     gbm = HistGradientBoostingClassifier(
         max_iter=300, learning_rate=0.06, max_leaf_nodes=15, min_samples_leaf=100,
         l2_regularization=1.0, random_state=0,
-        monotonic_cst=[mono[f] for f in FEATURES])
-    gbm.fit(tr[FEATURES].to_numpy(float), y_tr)
-    p_gbm = gbm.predict_proba(te[FEATURES].to_numpy(float))[:, 1]
+        categorical_features="from_dtype",
+        monotonic_cst=mono_vec)
+    gbm.fit(tr_g, y_tr)
+    p_gbm = gbm.predict_proba(te_g)[:, 1]
 
     print("\n" + "=" * 76)
     print("CHAMPION vs CHALLENGER (out-of-sample)")
@@ -140,8 +205,12 @@ def main() -> None:
         print("{:<26}{:>10.4f}{:>10.4f}{:>10.4f}{:>12.5f}".format(
             name, auc, 2 * auc - 1, ks(y_te, p), brier(y_te, p)))
 
-    print("\nMonotonic constraints on the GBM: {}".format(
+    print("\nBoth models see the same {} characteristics.".format(len(gbm_cols)))
+    print("Monotonic constraints on the GBM: {}".format(
         ", ".join("{} {}".format(f, "+" if mono[f] > 0 else "-") for f in FEATURES)))
+    print("The categoricals are unconstrained -- there is no domain direction to")
+    print("impose on a nominal characteristic, and inventing one would be a")
+    print("constraint with no argument behind it.")
     print("Domain says risk rises with DTI/utilisation/delinquency and falls with")
     print("credit age/tenure/income. An unconstrained GBM that disagrees in a thin")
     print("region is fitting noise, and it produces reason codes that read as absurd.")
@@ -208,7 +277,8 @@ def main() -> None:
     print("ADVERSE ACTION -- points-lost reasons (the artifact handed to a regulator)")
     print("-" * 76)
     for i in declined:
-        row = {f: float(te.iloc[i][f]) for f in FEATURES}
+        row = {f: (float(te.iloc[i][f]) if f in FEATURES else te.iloc[i][f])
+               for f in ALL_CHARACTERISTICS}
         print("\napplicant #{}  score {:.0f}  PD {:.4f}  -> DECLINE".format(
             int(te.index[i]), card.score(row), float(p_card[i])))
         for rc in card.reason_codes(row):

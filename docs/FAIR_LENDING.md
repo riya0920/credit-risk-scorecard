@@ -14,10 +14,10 @@ ECOA / Regulation B (15 U.S.C. 1691; 12 CFR 1002) governs discrimination in cred
 
 | group | n | approval rate |
 |---|---|---|
-| 1 | 2,805 | 0.7818 |
-| 0 | 4,855 | 0.8105 |
+| 1 | 2,846 | 0.7758 |
+| 0 | 4,570 | 0.8151 |
 
-**AIR = 0.9646**, bootstrap 95% CI [0.9393, 0.9899] -> does not flag the 80% rule
+**AIR = 0.9518**, bootstrap 95% CI [0.9291, 0.9740] -> does not flag the 80% rule
 
 The interval is reported because the 80% rule gets applied to a point estimate as though it were exact. An AIR of 0.79 on a thin sample and 0.79 on a fat one are not the same finding.
 
@@ -26,16 +26,16 @@ The interval is reported because the 80% rule gets applied to a point estimate a
 
 | statistic | group 1 | group 0 |
 |---|---|---|
-| mean PD | 0.2891 | 0.2767 |
-| median PD | 0.2715 | 0.2592 |
-| 10th pct PD | 0.1365 | 0.1297 |
+| mean PD | 0.2941 | 0.2773 |
+| median PD | 0.2809 | 0.2631 |
+| 10th pct PD | 0.1475 | 0.1319 |
 
-Group-separation AUC of the score: **0.4761** (0.500 = indistinguishable).
+Group-separation AUC of the score: **0.4609** (0.500 = indistinguishable).
 
 
 ## 3. Can the model's features reconstruct the protected attribute?
 
-Probe: logistic regression from the model's own features to group membership. **AUC = 0.5888**.
+Probe: logistic regression from the model's own features to group membership. **AUC = 0.5935**.
 
 This is the number that decides whether "we do not use the attribute" means anything. At 0.5 the features carry no group information; materially above it, the model can act on the attribute without ever being shown it.
 
@@ -46,10 +46,10 @@ Suspected proxies: `region_risk_proxy_a`, `region_risk_proxy_b` -- two features 
 
 | | full model | proxies dropped | change |
 |---|---|---|---|
-| AIR | 0.9646 | 0.9923 | +0.0277 |
-| group reconstruction AUC | 0.5888 | 0.5167 | -0.0721 |
+| AIR | 0.9518 | 0.9880 | +0.0362 |
+| group reconstruction AUC | 0.5935 | 0.5165 | -0.0770 |
 
-**19% of the recoverable group signal survives** dropping both proxies.
+**18% of the recoverable group signal survives** dropping both proxies.
 
 Dropping the proxies materially improved the AIR, which makes them a genuine driver of the disparity and a live remediation candidate -- weighed against the discrimination lost.
 
@@ -60,11 +60,11 @@ Tolerance (a stated policy choice, not a discovered constant): an alternative qu
 
 | candidate | AUC | AIR | AIR gain | AUC cost | verdict |
 |---|---|---|---|---|---|
-| champion (scorecard, all features) | 0.6649 | 0.9646 | - | - | baseline |
-| scorecard_without_proxies | 0.6544 | 0.9923 | +0.0277 | +0.0105 | reduces disparity but exceeds the accuracy tolerance |
-| gbm_challenger | 0.6636 | 0.9673 | +0.0027 | +0.0013 | does not reduce disparity materially |
+| champion (scorecard, all features) | 0.6674 | 0.9518 | - | - | baseline |
+| scorecard_without_proxies | 0.6533 | 0.9880 | +0.0362 | +0.0141 | reduces disparity but exceeds the accuracy tolerance |
+| gbm_challenger | 0.6709 | 0.9566 | +0.0048 | -0.0035 | does not reduce disparity materially |
 
-**This is the interesting outcome, so it should not be read past.** `scorecard_without_proxies` reduces the disparity by +0.0277 AIR at a cost of 0.0105 AUC. The stated tolerance is 0.005, so under the policy as written it does not qualify -- but the policy is a number I chose, and a regulator's question would be why 0.005 rather than 0.0105. Answering "our tolerance said no" is not a defence when the tolerance was set by the party whose model is under review. The honest position is that this alternative is live and the tolerance needs an owner outside modelling.
+**This is the interesting outcome, so it should not be read past.** `scorecard_without_proxies` reduces the disparity by +0.0362 AIR at a cost of 0.0141 AUC. The stated tolerance is 0.005, so under the policy as written it does not qualify -- but the policy is a number I chose, and a regulator's question would be why 0.005 rather than 0.0141. Answering "our tolerance said no" is not a defence when the tolerance was set by the party whose model is under review. The honest position is that this alternative is live and the tolerance needs an owner outside modelling.
 
 
 **Conclusion: an alternative DID reduce disparity but exceeded the stated accuracy tolerance -- the tolerance itself now requires justification, and this is not a clean pass.**

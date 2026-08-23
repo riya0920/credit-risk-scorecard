@@ -51,6 +51,17 @@ class CategoricalBin:
     is_other: bool = False
     low_event: bool = False
 
+    @property
+    def label(self) -> str:
+        """Numeric bins expose `label`; categorical ones exposed `level`.
+
+        The two are the same idea and the Scorecard reads `label`, so the alias
+        is what lets one card carry both kinds of characteristic instead of
+        needing a parallel code path. A parallel code path is how the points
+        table and the reason codes drift apart.
+        """
+        return self.level
+
 
 @dataclass
 class CategoricalBinning:
@@ -155,3 +166,80 @@ def split_special_values(x: np.ndarray, special_values: list) -> tuple:
     return ~(special | missing), pd.Series(
         np.where(missing, "__MISSING__",
                  np.where(special, arr.astype(object), None)))
+
+
+# ---------------------------------------------------------------- hybrid
+@dataclass
+class HybridBinning:
+    """A numeric characteristic that also carries special codes.
+
+    Credit age is a quantity, except when the bureau returns -9 for "no hit".
+    Neither pure treatment is right:
+
+      bin it all as a NUMBER   -9 sorts below every real credit age, so the
+                               no-hit population lands in the youngest-file bin
+                               and inherits its risk. That is an artefact of the
+                               encoding, not a statement anyone made about the
+                               applicant.
+      bin it all as a CATEGORY every distinct age becomes its own level, the
+                               rare ones merge into `__OTHER__`, and the whole
+                               characteristic collapses to two bins with
+                               identical points -- which is what happened here
+                               before this class existed, and it made the card
+                               carry a row that could not affect a decision.
+
+    So the special codes get their own bins, the remainder is binned as the
+    quantity it is, and the two sets of bins sit on one card under one name.
+    """
+    feature: str
+    numeric: object                 # woe.Binning over the non-special rows
+    specials: CategoricalBinning
+    special_values: list
+
+    @property
+    def bins(self):
+        return list(self.numeric.bins) + [
+            b for b in self.specials.bins if b.is_special or b.is_missing]
+
+    @property
+    def iv(self) -> float:
+        return float(self.numeric.iv + sum(
+            b.iv_contrib for b in self.specials.bins
+            if b.is_special or b.is_missing))
+
+    def _split(self, x):
+        arr = np.asarray(x, dtype=float)
+        special = np.isin(arr, np.asarray(self.special_values, dtype=float))
+        return arr, special | np.isnan(arr)
+
+    def transform(self, x) -> np.ndarray:
+        arr, is_special = self._split(x)
+        out = self.numeric.transform(np.where(is_special, np.nan, arr))
+        if is_special.any():
+            out[is_special] = self.specials.transform(
+                np.asarray(arr, dtype=object)[is_special])
+        return out
+
+    def bin_of(self, value):
+        arr, is_special = self._split([value])
+        if is_special[0]:
+            return self.specials.bin_of(value)
+        return self.numeric.bin_of(float(value))
+
+    def table(self) -> pd.DataFrame:
+        return pd.concat([self.numeric.table(),
+                          self.specials.table()], ignore_index=True)
+
+
+def fit_hybrid_binning(x, y: np.ndarray, feature: str, special_values: list,
+                       **kwargs) -> HybridBinning:
+    from .woe import fit_binning
+
+    numeric_mask, _ = split_special_values(x, special_values)
+    arr = np.asarray(x, dtype=float)
+    numeric = fit_binning(arr[numeric_mask], np.asarray(y)[numeric_mask], feature,
+                          **kwargs)
+    specials = fit_categorical_binning(
+        np.asarray(arr, dtype=object), y, feature,
+        special_values=[float(v) for v in special_values])
+    return HybridBinning(feature, numeric, specials, list(special_values))
