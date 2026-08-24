@@ -5,7 +5,7 @@ same characteristics, swap-set analysis, full fair-lending analysis, reject
 inference scored against counterfactual truth, **categorical / missing /
 special-value / hybrid binning carried on the card itself**, **twelve real
 booking vintages** with the mix-shift-versus-outcome-shift decomposition, and a
-**generated validation report**. **37 tests.**
+**generated validation report**. **40 tests.**
 
 ```bash
 python src/generate.py            # 12 vintages, categoricals, special codes
@@ -15,7 +15,8 @@ python run_fair_lending.py        # -> docs/FAIR_LENDING.md
 python run_reject_inference.py    # parcelling scored against hidden outcomes
 python run_validation_report.py   # -> docs/SCORECARD_VALIDATION.md
 python run_hmda_fair_lending.py   # REAL applicants, REAL protected attributes
-python -m pytest tests -q         # 37 tests
+python run_redlining.py           # geographic disparity on real census tracts
+python -m pytest tests -q         # 40 tests
 ```
 
 ## What is built
@@ -280,6 +281,47 @@ does not matter" would be reading the wrong number.
   12-applicant group at 100% becomes the benchmark and everyone fails against
   noise.
 
+## Redlining screen — a different question from the AIR
+
+The AIR asks whether individual applicants of one group fare worse. Redlining
+asks whether **places** do, and the two come apart: a lender can treat every
+applicant identically and still decline a neighbourhood by not lending in it.
+HMDA carries `census_tract`, so this is measurable on the data already here.
+
+| tract minority share | tracts | applications | denial rate | median income |
+|---|---|---|---|---|
+| <20% | 114 | 12,808 | 22.14% | $103k |
+| 20–50% | 115 | 14,775 | 29.84% | $84k |
+| 50–80% | 19 | 1,940 | 32.11% | $70k |
+
+A clean 10-point gradient — **and look at the income column before reading
+anything into it.** Tract minority share and tract income move opposite ways
+(a test asserts the correlation is negative), so a raw geographic gradient is
+partly an income gradient. **A disparity surviving no controls is not evidence
+of redlining**; it is evidence that poorer areas get declined more, which
+everyone already knows and which is not by itself unlawful.
+
+Controlling for underwriting **and** the applicant's own group:
+
+| term | coefficient | odds ratio |
+|---|---|---|
+| applicant is minority | +0.3459 | 1.413 |
+| tract minority share | +0.3306 | **1.392** |
+
+**The applicant's own group goes in the model first, on purpose.** Without it
+the tract term absorbs individual-level disparity and gets reported as geography
+— the ecological fallacy with a regression in front of it. A test asserts that
+adding the individual term *shrinks* the tract coefficient, which is the
+mechanism that warning describes.
+
+The tract term survives anyway. That is a screen, not a finding: no credit
+score, no property condition, and this is every lender in the state pooled
+rather than one institution's conduct.
+
+Thin tracts (under 30 applications) are excluded and **the exclusion is
+reported** — a tract with four applications and one denial has a 25% denial rate
+and belongs nowhere near the top of a report.
+
 ## What is NOT built
 
 1. **Real data for the SCORECARD.** The fair-lending analysis now runs on real
@@ -300,9 +342,12 @@ does not matter" would be reading the wrong number.
 4. **An independent validator.** `docs/SCORECARD_VALIDATION.md` has the sign-off
    section and both rows read UNSIGNED. Developer and validator are the same
    party, which under SR 11-7 blocks production use by itself.
-5. **Redlining analysis.** HMDA carries census tract, which is the input for
-   geographic disparity work this does not do. Pricing disparity is also open:
-   `interest_rate` is present on 73% of rows, originations only.
+5. **The strongest redlining evidence.** It is not the denial rate in a tract
+   -- it is the near-absence of APPLICATIONS from it, which means measuring
+   marketing and branch presence against tract population. HMDA alone cannot
+   see that, and neither can this. Peer-group comparison against similarly
+   situated lenders is also absent, as is pricing disparity (`interest_rate`
+   is on 73% of rows, originations only).
 6. **Business-necessity documentation** for the features driving the disparity —
    that requires the lender's justification, not the modeller's.
 7. **Override tracking.** No manual-underwrite path and no low-side/high-side

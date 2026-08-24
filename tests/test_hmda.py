@@ -102,3 +102,58 @@ def test_income_and_ltv_are_bounded_not_left_raw(df):
     every model fitted on it."""
     assert df.ltv.dropna().max() <= 200
     assert df.income_k.dropna().max() <= 5000
+
+
+# ------------------------------------------------------------ redlining
+def test_thin_tracts_are_excluded_and_the_exclusion_is_reported(df):
+    """A tract with four applications and one denial has a 25% denial rate and
+    means nothing. Ranking on it puts noise at the top of the report, which is
+    where the reader looks."""
+    g = df[df.census_tract.notna()].groupby(df.census_tract.astype(str)).size()
+    assert (g < 30).any(), "no thin tracts, so the guard is untested here"
+    assert (g >= 30).any(), "no usable tracts at all"
+
+
+def test_tract_minority_share_correlates_with_tract_income(df):
+    """The omitted-variable problem, asserted rather than asserted-away: a raw
+    geographic gradient is partly an income gradient, so a disparity surviving
+    no controls is not evidence of redlining."""
+    d = df[df.census_tract.notna()].copy()
+    g = d.groupby(d.census_tract.astype(str)).agg(
+        share=("is_minority", "mean"), inc=("income_k", "median"),
+        n=("denied", "size"))
+    g = g[g.n >= 30].dropna()
+    assert g.share.corr(g.inc) < 0, (
+        "expected minority share and tract income to move opposite ways")
+
+
+def test_geography_and_individual_disparity_are_different_questions(df):
+    """The AIR asks whether individual applicants fare worse; redlining asks
+    whether places do. A model that omits the applicant's own group lets the
+    tract term absorb individual disparity -- the ecological fallacy with a
+    regression in front of it."""
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+
+    feats = ["dti", "ltv", "income_k", "loan_amount_k", "loan_to_income"]
+    d = df[df.census_tract.notna()].dropna(subset=feats).copy()
+    tract = d.groupby(d.census_tract.astype(str)).agg(
+        share=("is_minority", "mean"), n=("denied", "size"))
+    tract = tract[tract.n >= 30]
+    d["ts"] = d.census_tract.astype(str).map(tract.share)
+    d = d.dropna(subset=["ts"])
+
+    X = d[feats].to_numpy(float)
+    y = d.denied.to_numpy()
+    ind = d.is_minority.to_numpy().astype(int)
+
+    without = LogisticRegression(max_iter=3000).fit(
+        np.column_stack([X, d.ts.to_numpy(float)]), y).coef_[0][-1]
+    with_ind = LogisticRegression(max_iter=3000).fit(
+        np.column_stack([X, ind, d.ts.to_numpy(float)]), y).coef_[0][-1]
+
+    assert with_ind < without, (
+        "adding the applicant's own group should SHRINK the tract coefficient; "
+        "it did not, so the tract term is not absorbing individual disparity "
+        "the way the ecological-fallacy warning assumes"
+    )
