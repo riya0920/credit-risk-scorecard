@@ -1,11 +1,11 @@
 # ML-3 — Credit Risk Scorecard with Fair-Lending Analysis
 
-**Status: ~98%.** Scorecard machinery, a real **LightGBM** challenger on the
+**Status: ~99%.** Scorecard machinery, a real **LightGBM** challenger on the
 same characteristics, swap-set analysis, full fair-lending analysis, reject
 inference scored against counterfactual truth, **categorical / missing /
 special-value / hybrid binning carried on the card itself**, **twelve real
 booking vintages** with the mix-shift-versus-outcome-shift decomposition, and a
-**generated validation report**. **29 tests.**
+**generated validation report**. **37 tests.**
 
 ```bash
 python src/generate.py            # 12 vintages, categoricals, special codes
@@ -14,7 +14,8 @@ python run_stability.py           # intervals, vintages, the two-shift split
 python run_fair_lending.py        # -> docs/FAIR_LENDING.md
 python run_reject_inference.py    # parcelling scored against hidden outcomes
 python run_validation_report.py   # -> docs/SCORECARD_VALIDATION.md
-python -m pytest tests -q         # 29 tests
+python run_hmda_fair_lending.py   # REAL applicants, REAL protected attributes
+python -m pytest tests -q         # 37 tests
 ```
 
 ## What is built
@@ -215,12 +216,78 @@ It is generated rather than written for the same reason ML-1's RESULTS.md is: a
 validation pack whose numbers were typed in by the developer is a document about
 the developer's memory.
 
+## Fair lending on REAL data — and the finding that changes the argument
+
+Every fair-lending number above runs on a generator whose protected attribute I
+fabricated. `run_hmda_fair_lending.py` runs the same arithmetic on **HMDA**: real
+mortgage applications, real decisions, and **real race, ethnicity and sex**,
+published by the CFPB, free, no account. 2023 Delaware: **29,929 applications,
+21,889 originated, 8,040 denied.**
+
+| group | applications | approval rate | AIR vs best | 80% rule |
+|---|---|---|---|---|
+| Joint | 606 | 79.37% | 1.0000 | pass |
+| White | 17,355 | 77.48% | 0.9762 | pass |
+| Asian | 1,384 | 76.88% | 0.9686 | pass |
+| **Black or African American** | **5,394** | **62.27%** | **0.7846** | **FAIL** |
+| 2 or more minority races | 120 | 56.67% | 0.7139 | **FAIL** |
+| Native Hawaiian / Pacific Islander | 62 | 50.00% | 0.6299 | **FAIL** |
+| American Indian / Alaska Native | 123 | 39.02% | 0.4917 | **FAIL** |
+
+### The headline: the aggregate passes while four groups fail
+
+The binary White-vs-everyone-else cut gives **AIR 0.8478 [0.8333, 0.8625] —
+passes.** Four individual groups fail, one of them with 5,394 applications.
+
+Rolling every non-White applicant into one bucket averages a 39% approval rate
+together with a 79% one and reports the mean. **The disparity did not go
+anywhere; it was averaged away, and the aggregate number would have closed the
+file.** ML-1 demonstrates that masking effect on constructed data with its
+intersectional cross — this is the same effect on 29,929 real applications, and
+it is the strongest argument in this repository for reporting group-by-group
+before reporting any summary. A test pins it, so if it ever stops holding the
+claim gets rewritten rather than quietly surviving.
+
+### What survives the underwriting controls
+
+| model | features | AUC |
+|---|---|---|
+| DTI, LTV, income, loan amount, loan-to-income | 5 | 0.7612 |
+| + group indicator | 6 | 0.7695 |
+
+Group coefficient **+0.5300** — an odds ratio of **1.699** on denial, after
+controlling for every underwriting variable HMDA carries.
+
+**That is a screen, not a verdict.** HMDA has no credit score, and the missing
+variable sits exactly where this residual lives. Any factor correlated with both
+group and risk shows up here whether or not any lender did anything wrong. It is
+grounds to investigate — which is what a regulator's screen is for.
+
+Note also that AUC barely moves (+0.0083). A variable can be statistically
+significant and add almost nothing to prediction; reading the AUC delta as "group
+does not matter" would be reading the wrong number.
+
+### Three loading decisions that could have skewed all of it
+
+- **Withdrawn is not denied.** Only action codes 1 and 3 are kept. Counting
+  withdrawals as denials is the commonest way a HMDA analysis manufactures a
+  disparity, because withdrawal rates differ by group for reasons that are not
+  the lender's decision.
+- **DTI is banded at the extremes.** Below 20% and above 60% it is a string, not
+  a number, so `to_numeric` drops precisely the tails. Both bands are mapped
+  back, and a test asserts they survive.
+- **The best-performing group must have ≥100 applications.** Otherwise a
+  12-applicant group at 100% becomes the benchmark and everyone fails against
+  noise.
+
 ## What is NOT built
 
-1. **Real data.** Lending Club / Home Credit swap-in not done; this is synthetic,
-   and the protected attribute is fabricated by the generator. No result here
-   describes a real population, and that is the one gap in this project no
-   amount of further code closes.
+1. **Real data for the SCORECARD.** The fair-lending analysis now runs on real
+   HMDA applications with real protected attributes. The scorecard itself is
+   still fitted on the generator, because HMDA records a lender's decision and
+   not a repayment outcome — there is no `defaulted` column to model. Freddie
+   Mac's loan-level performance data is the free source that has one, and
+   swapping it in is the remaining job.
 2. **A randomised approval holdout.** Parcelling, augmentation weighting and
    fuzzy augmentation are all implemented and scored against the generator's
    counterfactual outcomes, but reject inference cannot create information that
@@ -233,9 +300,9 @@ the developer's memory.
 4. **An independent validator.** `docs/SCORECARD_VALIDATION.md` has the sign-off
    section and both rows read UNSIGNED. Developer and validator are the same
    party, which under SR 11-7 blocks production use by itself.
-5. **Intersectional analysis.** One binary attribute, no age or marital status,
-   no geography-based redlining analysis. (ML-1 implements the intersectional
-   cross; this project does not.)
+5. **Redlining analysis.** HMDA carries census tract, which is the input for
+   geographic disparity work this does not do. Pricing disparity is also open:
+   `interest_rate` is present on 73% of rows, originations only.
 6. **Business-necessity documentation** for the features driving the disparity —
    that requires the lender's justification, not the modeller's.
 7. **Override tracking.** No manual-underwrite path and no low-side/high-side
