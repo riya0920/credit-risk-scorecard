@@ -27,3 +27,4 @@ Thumbs.db
 # src/hmda.py. Committing it would put a copy of a public dataset in a git
 # repo and invite the reader to trust the copy rather than the source.
 data/hmda_*.csv
+data/credit_default.parquet
