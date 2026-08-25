@@ -324,21 +324,29 @@ and belongs nowhere near the top of a report.
 
 ## What is NOT built
 
-1. **Real data for the SCORECARD.** The fair-lending analysis now runs on real
-   HMDA applications with real protected attributes. The scorecard itself is
-   still fitted on the generator, because HMDA records a lender's decision and
-   not a repayment outcome — there is no `defaulted` column to model. Freddie
-   Mac's loan-level performance data is the free source that has one, and
-   swapping it in is the remaining job.
+1. ~~**Real data for the SCORECARD.**~~ **DONE** — `src/repayment.py` fits a
+   card on 30,000 real credit accounts with a real default outcome AND real
+   protected attributes in the same file, which is the only configuration in
+   which fairness can be measured against *repayment* rather than against a past
+   decision. Freddie Mac was tried first and needs account registration; it also
+   holds only originated loans, so it has an outcome and no protected
+   attributes. Note the result that inverted: the HMDA decision model scores
+   AUC 0.7550 and the real-outcome model 0.7482 — predicting a decision is the
+   easier problem, so a high AUC on `denied` is evidence the target was easy.
+   See `docs/REPAYMENT.md`.
 2. **A randomised approval holdout.** Parcelling, augmentation weighting and
    fuzzy augmentation are all implemented and scored against the generator's
    counterfactual outcomes, but reject inference cannot create information that
    was never observed — it propagates an assumption. Only approving a random
    slice of marginal applicants buys real ground truth, and that costs money.
-3. **Interacting categoricals.** The generator's categorical effects are additive
-   on the log-odds, which is the scorecard's own functional form and is the
-   likeliest explanation for the challenger's edge disappearing. A generator with
-   genuine interactions would test that, and this one does not have them.
+3. ~~**Interacting categoricals.**~~ **DONE** — `src/interactions.py` detects
+   cells where the grid disagrees with the additive model, and screens each
+   interaction cell for protected-group concentration, which a per-feature
+   fairness check structurally cannot do. The screen produced a **spurious
+   finding on real data** — a 3.6x concentration built on *two applicants* — and
+   the fix (a group-count floor, not just a cell-size floor) is the recorded
+   lesson. After the fix the honest result on HMDA is null.
+   See `docs/INTERACTIONS.md`.
 4. **An independent validator.** `docs/SCORECARD_VALIDATION.md` has the sign-off
    section and both rows read UNSIGNED. Developer and validator are the same
    party, which under SR 11-7 blocks production use by itself.
