@@ -358,6 +358,10 @@ and belongs nowhere near the top of a report.
    is on 73% of rows, originations only).
 6. **Business-necessity documentation** for the features driving the disparity —
    that requires the lender's justification, not the modeller's.
-7. **Override tracking.** No manual-underwrite path and no low-side/high-side
+7. ~~**Override tracking.**~~ **DONE** — `src/overrides.py` classifies low-side
+   and high-side overrides, measures the effective-vs-policy cutoff, screens
+   discretion disparity by protected group, and flags undocumented overrides.
+   `run_overrides.py` measures the discretionary layer on 26,190 real HMDA
+   applications. Superseded note: No manual-underwrite path and no low-side/high-side
    override monitoring, which is where a scorecard's real-world performance
    usually goes wrong first.
